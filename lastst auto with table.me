@@ -1,0 +1,265 @@
+import tkinter as tk
+from tkinter import ttk
+import threading
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from controller import FlowController
+from hydrogensensor import hydrogen_sensor
+import time
+
+
+class AutomaticMode:
+    def __init__(self, root, back_callback, controller_1_port, controller_2_port):
+        self.root = root
+        self.back_callback = back_callback
+        self.root.title("Automatic Mode")
+
+        self.is_running = False
+
+        # Initialize PID variables
+        self.integral = 0
+        self.previous_error = 0
+
+        # Initialize flow controllers
+        self.controller_1 = FlowController(port=controller_1_port)
+        self.controller_2 = FlowController(port=controller_2_port)
+        self.controller_1.connect()
+        self.controller_2.connect()
+
+        # Set up the UI components
+        self.create_automatic_mode_window()
+
+    def create_automatic_mode_window(self):
+        # Sequence input fields
+        tk.Label(self.root, text="Insert your sequence:").grid(row=0, column=0)
+        self.sequence_entry = tk.Entry(self.root)
+        self.sequence_entry.grid(row=0, column=1)
+
+        # Flow Setpoint input
+        tk.Label(self.root, text="Flow Setpoint:").grid(row=1, column=0)
+        self.flow_setpoint_entry = tk.Entry(self.root)
+        self.flow_setpoint_entry.insert(0, "100")  # Default flow setpoint value
+        self.flow_setpoint_entry.grid(row=1, column=1)
+
+        # Verify button
+        self.verify_button = tk.Button(self.root, text="Verify", command=self.verify_sequence)
+        self.verify_button.grid(row=0, column=2)
+
+        # PID parameter input fields
+        tk.Label(self.root, text="Kp:").grid(row=2, column=0)
+        self.kp_entry = tk.Entry(self.root)
+        self.kp_entry.insert(0, "0.395")  # Default Kp value
+        self.kp_entry.grid(row=2, column=1)
+
+        tk.Label(self.root, text="Ki:").grid(row=3, column=0)
+        self.ki_entry = tk.Entry(self.root)
+        self.ki_entry.insert(0, "0.0350")  # Default Ki value
+        self.ki_entry.grid(row=3, column=1)
+
+        tk.Label(self.root, text="Kd:").grid(row=4, column=0)
+        self.kd_entry = tk.Entry(self.root)
+        self.kd_entry.insert(0, "0.1")  # Default Kd value
+        self.kd_entry.grid(row=4, column=1)
+
+        # Set and Run button (initially disabled)
+        self.run_button = tk.Button(self.root, text="Set and Run", command=self.start_sequence, state="disabled")
+        self.run_button.grid(row=5, column=1)
+
+        # Stop button
+        self.stop_button = tk.Button(self.root, text="Stop", command=self.stop_controller)
+        self.stop_button.grid(row=5, column=2)
+
+        # Back button
+        self.back_button = tk.Button(self.root, text="Back", command=self.back_stop_process)
+        self.back_button.grid(row=6, column=2, sticky="e")
+
+        # Set up the table for displaying sequence
+        self.setup_table()
+
+        # Initialize the live plot
+        self.fig, self.ax1 = plt.subplots()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().grid(row=8, column=0, columnspan=3)
+
+        self.line_setpoint, = self.ax1.plot([], [], label="Setpoint", color='blue')
+        self.line_measured, = self.ax1.plot([], [], label="Measured Value", color='green')
+        self.ax1.set_xlabel("Time Step")
+        self.ax1.set_ylabel("Hydrogen Flow Rate and Measured Value", color='blue')
+        self.ax1.legend(loc="upper left")
+
+        self.ax2 = self.ax1.twinx()
+        self.line_control, = self.ax2.plot([], [], label="Control Signal", color='red')
+        self.ax2.set_ylabel("Control Signal (0-100)", color='red')
+        self.ax2.legend(loc="upper right")
+
+        # Data for plotting
+        self.time_steps = []
+        self.setpoints = []
+        self.measured_values = []
+        self.hydrogen_flowrates = []
+        self.sequence = []
+
+    def setup_table(self):
+        """Set up the table with a vertical scrollbar."""
+        self.columns = ("Time (min)", "Setpoint")
+        self.sequence_table = ttk.Treeview(self.root, columns=self.columns, show="headings")
+        self.sequence_table.heading("Time (min)", text="Time (min)")
+        self.sequence_table.heading("Setpoint", text="Setpoint")
+        self.sequence_table.column("Time (min)", width=80, anchor="center")
+        self.sequence_table.column("Setpoint", width=100, anchor="center")
+
+        # Add scrollbar
+        self.y_scrollbar = ttk.Scrollbar(self.root, orient="vertical", command=self.sequence_table.yview)
+        self.sequence_table.configure(yscrollcommand=self.y_scrollbar.set)
+
+        self.sequence_table.grid(row=7, column=0, columnspan=2, padx=10, pady=10)
+        self.y_scrollbar.grid(row=7, column=2, sticky="ns")
+
+    def verify_sequence(self):
+        """Verify the input sequence."""
+        input_sequence = self.sequence_entry.get().split(',')
+        try:
+            # Convert the input to integers and check length
+            sequence = list(map(int, input_sequence))
+            if len(sequence) % 2 != 0:
+                raise ValueError("Sequence must have an even number of values.")
+
+            # Check that every second value is within 0-20000
+            for i in range(1, len(sequence), 2):
+                if not (0 <= sequence[i] <= 20000):
+                    raise ValueError("Setpoint values must be between 0 and 20000.")
+
+            # Update sequence and enable the run button
+            self.sequence = [(sequence[i], sequence[i + 1]) for i in range(0, len(sequence), 2)]
+            self.run_button.config(state="normal")
+
+            # Clear and populate the table
+            for row in self.sequence_table.get_children():
+                self.sequence_table.delete(row)
+            for time_val, setpoint in self.sequence:
+                self.sequence_table.insert("", "end", values=(time_val, setpoint))
+
+            tk.messagebox.showinfo("Verification", "Verification successful!")
+        except ValueError as e:
+            tk.messagebox.showerror("Verification Error", str(e))
+            self.run_button.config(state="disabled")
+
+    def start_sequence(self):
+        """Run the sequence according to the verified time and setpoints."""
+        if not self.is_running:
+            # Retrieve PID parameters from user inputs
+            self.kp = float(self.kp_entry.get())
+            self.ki = float(self.ki_entry.get())
+            self.kd = float(self.kd_entry.get())
+
+            # Retrieve flow setpoint
+            self.flow_setpoint = int(self.flow_setpoint_entry.get())
+
+            self.is_running = True
+            self.control_thread = threading.Thread(target=self.run_sequence)
+            self.control_thread.start()
+
+    def run_sequence(self):
+        """Execute each (time, setpoint) pair in the sequence with the PID control loop."""
+        for time_val, setpoint in self.sequence:
+            if not self.is_running:
+                break
+
+            # Set the current setpoint for the control loop
+            self.setpoint = setpoint
+
+            # Start the control loop for the specified duration
+            self.run_for_duration(time_val)
+
+        # After the sequence completes, stop controllers and display completion message
+        self.controller_1.set_flow_rate(0)
+        self.controller_2.set_flow_rate(0)
+        tk.messagebox.showinfo("Completion", "Testing completed")
+        self.is_running = False
+
+    def run_for_duration(self, minutes):
+        """Run the PID control loop for the specified duration in minutes."""
+        end_time = time.time() + minutes * 60  # Convert minutes to seconds
+
+        while time.time() < end_time and self.is_running:
+            measured_value = hydrogen_sensor()
+            
+            filtered_measured_value = moving_average(measured_value)
+
+            # Calculate control signal using PID algorithm to match the current setpoint
+            control_signal = self.pid_controller(self.setpoint, filtered_measured_value)
+            
+            
+
+            # Calculate flow rates for both controllers based on control signal
+            hydrogen_flowrate = (self.flow_setpoint / 100) * control_signal
+            air_flowrate = self.flow_setpoint - hydrogen_flowrate
+            
+            print(f"H2 Flowrate: {hydrogen_flowrate}")
+            
+            # Apply flow rates to the controllers
+            self.controller_1.set_flow_rate(hydrogen_flowrate)
+            self.controller_2.set_flow_rate(air_flowrate)
+
+            # Update live plot with current data
+            self.time_steps.append(len(self.time_steps))
+            self.setpoints.append(self.setpoint)
+            self.measured_values.append(measured_value)
+            self.hydrogen_flowrates.append(hydrogen_flowrate)
+
+            # Limit display range to the last 300 points
+            display_range = 300
+            time_data = self.time_steps[-display_range:]
+            setpoint_data = self.setpoints[-display_range:]
+            measured_data = self.measured_values[-display_range:]
+            hydrogen_flowrate_data = self.hydrogen_flowrates[-display_range:]
+
+            # Update plot lines
+            self.line_setpoint.set_data(time_data, setpoint_data)
+            self.line_measured.set_data(time_data, measured_data)
+            self.line_control.set_data(time_data, hydrogen_flowrate_data)
+
+            # Rescale plot axes
+            self.ax1.set_xlim(min(time_data), max(time_data))
+            self.ax1.set_ylim(0, max(self.setpoints) * 1.2)  # Adjust Y-axis as needed
+            self.ax2.set_ylim(0, 250)  # Control signal range
+
+            # Draw the plot
+            self.canvas.draw()
+            
+    def moving_average(data, window_size=5):
+        return sum(data[-window_size:]) / len(data[-window_size:])
+
+    def stop_controller(self):
+        """Stop the sequence and reset controllers."""
+        self.is_running = False
+
+    def back_stop_process(self):
+        """Stop process and reset flow rates to zero."""
+        self.is_running = False
+        self.controller_1.set_flow_rate(0)
+        self.controller_2.set_flow_rate(0)
+        self.back_callback()
+
+    def pid_controller(self, setpoint, measured_value):
+        """Calculate the control signal using PID."""
+        error = setpoint - measured_value
+        
+        kp = self.kp
+        ki = self.ki
+        kd = self.kd
+        
+        print(f"{kp} | {ki} | {kd}")
+        
+        proportional = self.kp * error
+        self.integral += error
+        integral = self.ki * self.integral
+        derivative = self.kd * (error - self.previous_error)
+        self.previous_error = error
+
+        # PID output
+        output = proportional + integral + derivative
+
+        # Scale output to be within 0–100 range
+        scaled_output = max(0, min(100, output / 200))
+        return scaled_output

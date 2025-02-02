@@ -1,0 +1,209 @@
+import tkinter as tk
+import threading
+import matplotlib.pyplot as plt
+from simple_pid import PID
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from controller import FlowController  # Import FlowController
+from hydrogensensor import hydrogen_sensor  # Import Hydrogen Sensor
+
+class AutomaticMode:
+    def __init__(self, root, back_callback, controller_1_port, controller_2_port):
+        self.root = root
+        self.back_callback = back_callback
+        self.root.title("Automatic Mode")  # Set the window title to "Automatic Mode"
+
+        # Initialize PID parameters
+        self.kp = 0.395
+        self.ki = 0.0380
+        self.kd = 0.4
+        self.integral = 0
+        self.previous_error = 0
+        self.is_running = False
+        
+        
+        # Initialize flow controllers
+        self.controller_1 = FlowController(port=controller_1_port)
+        self.controller_2 = FlowController(port=controller_2_port)
+
+        # Connect to both controllers
+        self.controller_1.connect()
+        self.controller_2.connect()
+
+        # Set up the UI components
+        self.create_automatic_mode_window()
+
+    def create_automatic_mode_window(self):
+        # Create input fields
+        tk.Label(self.root, text="Setpoint:").grid(row=0, column=0)
+        self.setpoint_entry = tk.Entry(self.root)
+        self.setpoint_entry.grid(row=0, column=1)
+
+        tk.Label(self.root, text="Flow Setpoint:").grid(row=1, column=0)
+        self.flow_entry = tk.Entry(self.root)
+        self.flow_entry.grid(row=1, column=1)
+        
+        # Create kp, ki, kd input fields with default values
+        tk.Label(self.root, text="Kp:").grid(row=2, column=0)
+        self.kp_entry = tk.Entry(self.root)
+        self.kp_entry.insert(0, "0.395")  # Default Kp value
+        self.kp_entry.grid(row=2, column=1)
+        
+        tk.Label(self.root, text="Ki:").grid(row=3, column=0)
+        self.ki_entry = tk.Entry(self.root)
+        self.ki_entry.insert(0, "0.0350")  # Default Ki value
+        self.ki_entry.grid(row=3, column=1)
+        
+        tk.Label(self.root, text="Kd:").grid(row=4, column=0)
+        self.kd_entry = tk.Entry(self.root)
+        self.kd_entry.insert(0, "0.1")  # Default Kd value
+        self.kd_entry.grid(row=4, column=1)
+
+        # Create buttons
+        self.run_button = tk.Button(self.root, text="Set and Run", command=self.start_controller)
+        self.run_button.grid(row=5, column=1)
+        
+        #Labels for Hydrogen PPM and Total Flow Rate
+        self.hydrogen_ppm = tk.Label(self.root, text="H2 Concentration: 0 PPM")
+        self.hydrogen_ppm.grid(row=6, column=0, padx=10, pady=10, sticky="w")
+
+        self.stop_button = tk.Button(self.root, text="Stop", command=self.stop_controller)
+        self.stop_button.grid(row=5, column=2)
+
+        # Replace the exit button with a back button
+        self.back_button = tk.Button(self.root, text="Back", command=self.back_stop_process)
+        self.back_button.grid(row=6, column=2, sticky="e")
+
+        # Initialize the live plot
+        self.fig, self.ax1 = plt.subplots()
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.root)
+        self.canvas.get_tk_widget().grid(row=7, column=0, columnspan=3)
+
+        self.line_setpoint, = self.ax1.plot([], [], label="Setpoint", color='blue')
+        self.line_measured, = self.ax1.plot([], [], label="Measured Value", color='green')
+        self.ax1.set_xlabel("Time Step")
+        self.ax1.set_ylabel("Hydrogen Flow Rate and Measured Value", color='blue')
+        self.ax1.legend(loc="upper left")
+
+        self.ax2 = self.ax1.twinx()
+        self.line_control, = self.ax2.plot([], [], label="Control Signal", color='red')
+        self.ax2.set_ylabel("Control Signal (0-100)", color='red')
+        self.ax2.legend(loc="upper right")
+
+        # Data for plotting
+        self.time_steps = []
+        self.setpoints = []
+        self.measured_values = []
+        self.hydrogen_flowrates = []
+
+    def pid_controller(self, setpoint, measured_value):
+        """Calculate the control signal using PID."""
+                      
+        kp = self.kp
+        ki = self.ki
+        kd = self.kd  
+              
+        error = setpoint - measured_value
+        proportional = self.kp * error
+        self.integral += error
+        integral = self.ki * self.integral
+        derivative = self.kd * (error - self.previous_error)
+        self.previous_error = error
+
+        # PID output
+        output = proportional + integral + derivative
+        
+
+        # Scale output to be within 0–100 range, if needed
+        scaled_output = max(0, min(100, output / 200))
+        print(f'scaled output {scaled_output}')
+        return scaled_output
+
+    def start_controller(self):
+        """Start or update the PID controller with updated values from input fields."""
+
+        # Update PID parameters from user inputs
+        self.kp = float(self.kp_entry.get())
+        self.ki = float(self.ki_entry.get())
+        self.kd = float(self.kd_entry.get())
+        
+        # Retrieve setpoints
+        self.setpoint = int(self.setpoint_entry.get())
+        self.flow_setpoint = int(self.flow_entry.get())
+        
+        if not self.is_running:
+            # Set the controller to running state
+            self.is_running = True
+            
+            # Start the control loop in a separate thread
+            self.control_thread = threading.Thread(target=self.control_loop)
+            self.control_thread.start()
+
+    def stop_controller(self):
+        """Stop the PID control loop."""
+        self.is_running = False
+        
+    def back_stop_process(self):
+        """Stop process and reset flow rates to zero."""
+        self.is_running = False
+        self.controller_1.set_flow_rate(0)
+        self.controller_2.set_flow_rate(0)
+        self.back_callback()
+
+    def control_loop(self):
+        """Main loop for the PID controller."""
+
+        while self.is_running:
+            try:
+            
+                # Get hydrogen sensor reading and update the label
+                ppm_value = hydrogen_sensor()
+                self.hydrogen_ppm.config(text=f"H2 Concentration: {ppm_value:.2f} PPM")
+                
+                # Always use the latest values of setpoint and flow_setpoint
+                setpoint = self.setpoint
+                flow_setpoint = self.flow_setpoint
+
+                # Read the measured value from the hydrogen sensor
+                measured_value = hydrogen_sensor()
+                
+                # Calculate control signal based on PID output
+                control_signal = self.pid_controller(setpoint, measured_value)
+                
+                # Calculate hydrogen and air flow rates based on control signal
+                hydrogen_flowrate = (flow_setpoint / 100) * control_signal
+                air_flowrate = flow_setpoint - hydrogen_flowrate
+                
+                
+                # Set flow rates for both controllers
+                self.controller_1.set_flow_rate(hydrogen_flowrate)
+                self.controller_2.set_flow_rate(air_flowrate)
+                
+                # Update plot data
+                self.time_steps.append(len(self.time_steps))
+                self.setpoints.append(setpoint)
+                self.measured_values.append(measured_value)
+                self.hydrogen_flowrates.append(hydrogen_flowrate)
+
+                # Limit display range to the last 300 points
+                display_range = 300
+                time_data = self.time_steps[-display_range:]
+                setpoint_data = self.setpoints[-display_range:]
+                measured_data = self.measured_values[-display_range:]
+                hydrogen_flowrate_data = self.hydrogen_flowrates[-display_range:]
+
+                # Update plot lines
+                self.line_setpoint.set_data(time_data, setpoint_data)
+                self.line_measured.set_data(time_data, measured_data)
+                self.line_control.set_data(time_data, hydrogen_flowrate_data)
+
+                # Rescale plot axes
+                self.ax1.set_xlim(min(time_data), max(time_data))
+                self.ax1.set_ylim(0, max(self.setpoints) * 1.2)  # Adjust Y-axis as needed
+                self.ax2.set_ylim(0, 250)  # Control signal range
+
+                # Draw the plot
+                self.canvas.draw()
+                
+            except Exception as e:
+                print(f"Error in control loop: {e}")
+                self.stop_controller()

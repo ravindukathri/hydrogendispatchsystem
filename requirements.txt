@@ -1,0 +1,9 @@
+sensirion_shdlc_driver
+sensirion_shdlc_sfc5xxx
+pyserial
+adafruit-blinka
+adafruit-circuitpython-ads1x15
+smbus2
+numpy
+matplotlib
+simple-pid
